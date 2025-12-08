@@ -1,0 +1,248 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import common
+from matplotlib.widgets import Slider, CheckButtons
+
+class InteractiveSolarSystem:
+    def __init__(self, initial_condition="solar_system_plus", mode="pluto_fast"):
+        # Load full system first (AU, AU/day; barycentric)
+        full_system, full_labels, full_colors, full_legend = common.get_initial_conditions(initial_condition)
+
+        # Choose mode: either full system or a reduced outer system for fast Pluto visualization
+        if mode == "pluto_fast":
+            # Keep Sun + giants + Pluto only for larger dt without Mercury constraints
+            keep_names = {"Sun","Jupiter","Saturn","Uranus","Neptune","Pluto"}
+        else:
+            keep_names = set(full_labels)
+
+        # Map indices to keep
+        name_to_idx = {name: i for i, name in enumerate(full_labels)}
+        keep_idx = [name_to_idx[n] for n in full_labels if n in keep_names]
+
+        # Build reduced (or full) system arrays
+        x = full_system.x[keep_idx].copy()
+        v = full_system.v[keep_idx].copy()
+        m = full_system.m[keep_idx].copy()
+        labels = [full_labels[i] for i in keep_idx]
+        colors = [full_colors[i] for i in keep_idx]
+
+        # Create the working system
+        self.system = common.System(num_particles=len(m), x=x, v=v, m=m, G=full_system.G)
+        self.system.center_of_mass_correction()
+        self.labels, self.colors, self.legend = labels, colors, True
+
+        # Identify Pluto for inclination control (if present)
+        self.pluto_index = None
+        for i, label in enumerate(self.labels):
+            if label and "pluto" in label.lower():
+                self.pluto_index = i
+                self.orig_pluto_pos = self.system.x[i].copy()
+                self.orig_pluto_vel = self.system.v[i].copy()
+                break
+
+        # Color fallbacks for minor bodies if needed
+        for i, name in enumerate(self.labels):
+            if not self.colors[i] or self.colors[i] == "gray":
+                if name and name.lower() == "pluto":
+                    self.colors[i] = "#A259E6"
+                elif name and name.lower() == "ceres":
+                    self.colors[i] = "#E6C229"
+                elif name and name.lower() == "vesta":
+                    self.colors[i] = "#59E682"
+                else:
+                    self.colors[i] = "#808080"
+
+        # Simulation parameters
+        if mode == "pluto_fast":
+            # Outer system tolerates larger dt while remaining stable with leapfrog
+            self.dt = 5.0                 # days/step
+            self.steps_per_frame = 120    # physics steps per animation frame (fast time-warp)
+            self.max_days_per_step = 10.0
+            self.max_steps_per_frame = 600
+        else:
+            # Full system constrained by Mercury; keep dt small and warp via steps/frame
+            self.dt = 1.0                 # days/step
+            self.steps_per_frame = 120
+            self.max_days_per_step = 2.0
+            self.max_steps_per_frame = 600
+
+        self.current_time = 0.0
+        self.trail_length = 1200
+
+        # Trails
+        self.trails = [[] for _ in range(self.system.num_particles)]
+
+        # Figure
+        self.fig = plt.figure(figsize=(12, 9))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.setup_camera_controls()
+
+        self.ax.set_xlabel('X (AU)')
+        self.ax.set_ylabel('Y (AU)')
+        self.ax.set_zlabel('Z (AU)')
+        self.ax.set_title('Interactive Solar System - Time: 0 days')
+
+        # Body and trail plots
+        self.body_plots = []
+        self.trail_plots = []
+        for i in range(self.system.num_particles):
+            body_plot = self.ax.scatter([], [], [], color=self.colors[i], s=60, alpha=0.9, label=self.labels[i])
+            self.body_plots.append(body_plot)
+            trail_plot, = self.ax.plot([], [], [], color=self.colors[i], alpha=0.5, linewidth=1.2)
+            self.trail_plots.append(trail_plot)
+
+        # Checkboxes for visibility
+        labels_disp = [lbl if lbl else f"Body {i}" for i, lbl in enumerate(self.labels)]
+        visibility = [True] * len(labels_disp)
+        check_ax = plt.axes([0.78, 0.55, 0.18, 0.35], facecolor='none')
+        self.checks = CheckButtons(check_ax, labels_disp, visibility)
+        check_ax.set_axis_off()
+        for i, txt in enumerate(self.checks.labels):
+            color = self.colors[i] if self.colors[i] is not None else "gray"
+            txt.set_color(color)
+            txt.set_fontsize(10)
+            txt.set_backgroundcolor((1, 1, 1, 0.6))
+        check_ax.text(0.5, 1.05, "Bodies", transform=check_ax.transAxes, ha='center', va='bottom', fontsize=12, color='black')
+
+        def toggle(label):
+            idx = labels_disp.index(label)
+            vis = not self.body_plots[idx].get_visible()
+            self.body_plots[idx].set_visible(vis)
+            self.trail_plots[idx].set_visible(vis)
+            plt.draw()
+
+        self.checks.on_clicked(toggle)
+
+        # Acceleration array (initialize once)
+        self.a = np.zeros((self.system.num_particles, 3))
+        common.acceleration_numba(self.a, self.system.x, self.system.m, self.system.G, self.system.num_particles)
+
+        print(f"Fast setup: {self.steps_per_frame} steps of {self.dt} days per frame")
+
+        # UI state
+        self.mode = mode
+
+    def setup_camera_controls(self):
+        """Set fixed view limits based on Pluto's current distance"""
+        pluto_distance = 0.0
+        for i, label in enumerate(self.labels):
+            if label and "pluto" in label.lower():
+                pluto_distance = np.linalg.norm(self.system.x[i])
+                break
+        self.view_limit = max(pluto_distance * 1.4, 40.0)
+        self.ax.set_xlim(-self.view_limit, self.view_limit)
+        self.ax.set_ylim(-self.view_limit, self.view_limit)
+        self.ax.set_zlim(-self.view_limit, self.view_limit)
+        print(f"View locked at ±{self.view_limit:.1f} AU for Pluto visibility")
+
+    def update_physics(self):
+        """Advance physics by one fixed symplectic step"""
+        common.velocity_verlet_numba(self.a, self.system.x, self.system.v,
+                                     self.system.m, self.system.G,
+                                     self.system.num_particles, self.dt)
+        self.current_time += self.dt
+
+        # Update trails
+        for i in range(self.system.num_particles):
+            self.trails[i].append(self.system.x[i].copy())
+            if len(self.trails[i]) > self.trail_length:
+                self.trails[i].pop(0)
+
+    def animate(self, frame):
+        """Animation callback"""
+        try:
+            # Do many physics steps per rendered frame to 'time-warp'
+            for _ in range(self.steps_per_frame):
+                self.update_physics()
+
+            # Draw once at the end of the warp
+            for i in range(self.system.num_particles):
+                self.body_plots[i]._offsets3d = ([self.system.x[i, 0]],
+                                                 [self.system.x[i, 1]],
+                                                 [self.system.x[i, 2]])
+                if len(self.trails[i]) > 1:
+                    trail = np.array(self.trails[i])
+                    self.trail_plots[i].set_data(trail[:, 0], trail[:, 1])
+                    self.trail_plots[i].set_3d_properties(trail[:, 2])
+                    self.trail_plots[i].set_alpha(0.6)
+                    self.trail_plots[i].set_linewidth(1.5)
+
+            self.ax.set_xlim(-self.view_limit, self.view_limit)
+            self.ax.set_ylim(-self.view_limit, self.view_limit)
+            self.ax.set_zlim(-self.view_limit, self.view_limit)
+
+            years = self.current_time / 365.25
+            days_per_frame = self.dt * self.steps_per_frame
+            self.ax.set_title(f'Solar System - {years:.1f} years ({self.current_time:.0f} days), {days_per_frame:.0f} d/frame')
+        except Exception as e:
+            print(f"Animation error: {e}")
+
+        return self.body_plots + self.trail_plots
+
+    def set_pluto_inclination(self, inclination_deg):
+        """Rotate Pluto around x-axis by inclination from original vectors"""
+        if self.pluto_index is None:
+            return
+        angle = np.radians(inclination_deg)
+        rot = np.array([[1, 0, 0],
+                        [0, np.cos(angle), -np.sin(angle)],
+                        [0, np.sin(angle),  np.cos(angle)]])
+        self.system.x[self.pluto_index] = rot @ self.orig_pluto_pos
+        self.system.v[self.pluto_index] = rot @ self.orig_pluto_vel
+
+    def set_dt(self, val):
+        """Change dt with a conservative cap for stability"""
+        if val > self.max_days_per_step:
+            print(f"Capping dt at {self.max_days_per_step} days/step for stability.")
+            val = self.max_days_per_step
+            if hasattr(self, "slider_dt"):
+                self.slider_dt.set_val(val)
+        self.dt = max(0.1, float(val))
+        print(f"dt set to {self.dt} days/step")
+
+    def set_warp(self, val):
+        """Change steps per frame to speed up elapsed time without changing dt"""
+        val = int(val)
+        if val > self.max_steps_per_frame:
+            val = self.max_steps_per_frame
+            if hasattr(self, "slider_warp"):
+                self.slider_warp.set_val(val)
+        self.steps_per_frame = max(1, val)
+        print(f"Steps per frame set to {self.steps_per_frame}")
+
+    def run(self):
+        """Start the interactive animation with sliders"""
+        self.ani = FuncAnimation(self.fig, self.animate, interval=40, blit=False, cache_frame_data=False)
+
+        plt.subplots_adjust(bottom=0.30)
+
+        ax_incl = plt.axes([0.15, 0.16, 0.65, 0.03], facecolor='lightgoldenrodyellow')
+        self.slider_incl = Slider(ax_incl, 'Pluto Incl. (°)', 0, 90, valinit=17, valstep=1)
+        self.slider_incl.on_changed(self.set_pluto_inclination)
+
+        # dt slider
+        ax_dt = plt.axes([0.15, 0.11, 0.65, 0.03], facecolor='lightblue')
+        self.slider_dt = Slider(ax_dt, 'dt (days/step)',
+                                0.1, self.max_days_per_step,
+                                valinit=self.dt, valstep=0.1)
+        self.slider_dt.on_changed(self.set_dt)
+
+        # time-warp slider: number of physics steps per animation frame
+        ax_warp = plt.axes([0.15, 0.06, 0.65, 0.03], facecolor='lavender')
+        self.slider_warp = Slider(ax_warp, 'Time warp (steps/frame)',
+                                  1, self.max_steps_per_frame,
+                                  valinit=self.steps_per_frame, valstep=1)
+        self.slider_warp.on_changed(self.set_warp)
+
+        print("Interactive Solar System Started!")
+        print("- Adjust 'dt' and 'Time warp' to speed up years per second while staying stable.")
+        print("- Use Pluto Inclination slider to set a 90° orbit for easy visualization.")
+
+        plt.show()
+
+# Usage
+if __name__ == "__main__":
+    # mode="pluto_fast" for speed and clarity of Pluto's 90° orbit; use mode="full" for all bodies
+    sim = InteractiveSolarSystem("solar_system_plus", mode="pluto_fast")
+    sim.run()

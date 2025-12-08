@@ -1,0 +1,196 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import common
+from matplotlib.widgets import Slider, CheckButtons
+
+class InteractiveSolarSystem:
+    def __init__(self, initial_condition="solar_system_plus"):
+        # Get initial conditions (AU, AU/day; barycentric)
+        self.system, self.labels, self.colors, self.legend = common.get_initial_conditions(initial_condition)
+
+        # Fix undefined or dull colors for minor bodies
+        for i, name in enumerate(self.labels):
+            if not self.colors[i] or self.colors[i] == "gray":
+                if name and name.lower() == "pluto":
+                    self.colors[i] = "#A259E6"   # deep violet
+                elif name and name.lower() == "ceres":
+                    self.colors[i] = "#E6C229"   # golden yellow
+                elif name and name.lower() == "vesta":
+                    self.colors[i] = "#59E682"   # bright green
+                else:
+                    self.colors[i] = "#808080"   # neutral light gray
+
+        # Store Pluto's original vectors for inclination changes
+        self.pluto_index = None
+        for i, label in enumerate(self.labels):
+            if label and "pluto" in label.lower():
+                self.pluto_index = i
+                self.orig_pluto_pos = self.system.x[i].copy()
+                self.orig_pluto_vel = self.system.v[i].copy()
+                break
+
+        # Simulation parameters – safer defaults
+        self.dt = 5.0               # 0.5 days per step (stable for Mercury)
+        self.steps_per_frame = 200   # physics steps per animation frame
+        self.current_time = 0.0
+        self.trail_length = 800
+
+        # Storage for trails
+        self.trails = [[] for _ in range(self.system.num_particles)]
+
+        # Set up the plot
+        self.fig = plt.figure(figsize=(12, 9))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+
+        # Set up camera controls and view limits
+        self.setup_camera_controls()
+
+        self.ax.set_xlabel('X (AU)')
+        self.ax.set_ylabel('Y (AU)')
+        self.ax.set_zlabel('Z (AU)')
+        self.ax.set_title('Interactive Solar System - Time: 0 days')
+
+        # Initialize empty plots for bodies and trails
+        self.body_plots = []
+        self.trail_plots = []
+
+        for i in range(self.system.num_particles):
+            body_plot = self.ax.scatter([], [], [], color=self.colors[i], s=60, alpha=0.9, label=self.labels[i])
+            self.body_plots.append(body_plot)
+
+            trail_plot, = self.ax.plot([], [], [], color=self.colors[i], alpha=0.5, linewidth=1.2)
+            self.trail_plots.append(trail_plot)
+
+        # Build labels & visibility for checkboxes
+        labels = [lbl if lbl else f"Body {i}" for i, lbl in enumerate(self.labels)]
+        visibility = [True] * len(labels)
+
+        # Transparent panel in upper-right
+        check_ax = plt.axes([0.78, 0.6, 0.15, 0.3], facecolor='none')
+        self.checks = CheckButtons(check_ax, labels, visibility)
+        check_ax.set_axis_off()
+
+        for i, txt in enumerate(self.checks.labels):
+            color = self.colors[i] if self.colors[i] is not None else "gray"
+            txt.set_color(color)
+            txt.set_fontsize(10)
+            txt.set_backgroundcolor((1, 1, 1, 0.6))  # semi-transparent white behind text
+
+        check_ax.text(0.5, 1.05, "Planets", transform=check_ax.transAxes, ha='center', va='bottom', fontsize=12, color='black')
+
+        def toggle(label):
+            idx = labels.index(label)
+            vis = not self.body_plots[idx].get_visible()
+            self.body_plots[idx].set_visible(vis)
+            self.trail_plots[idx].set_visible(vis)
+            plt.draw()
+
+        self.checks.on_clicked(toggle)
+
+        # Acceleration array (initialize once)
+        self.a = np.zeros((self.system.num_particles, 3))
+        common.acceleration_numba(self.a, self.system.x, self.system.m, self.system.G, self.system.num_particles)
+
+        print(f"Stable setup: {self.steps_per_frame} steps of {self.dt} days per frame")
+
+    def setup_camera_controls(self):
+        """Set up fixed view limits based on Pluto's current distance"""
+        pluto_distance = 0.0
+        for i, label in enumerate(self.labels):
+            if label and "pluto" in label.lower():
+                pluto_distance = np.linalg.norm(self.system.x[i])
+                break
+        self.view_limit = max(pluto_distance * 1.4, 40.0)
+        self.ax.set_xlim(-self.view_limit, self.view_limit)
+        self.ax.set_ylim(-self.view_limit, self.view_limit)
+        self.ax.set_zlim(-self.view_limit, self.view_limit)
+        print(f"View locked at ±{self.view_limit:.1f} AU to keep Pluto visible")
+
+    def update_physics(self):
+        """Advance physics by one fixed symplectic step"""
+        common.velocity_verlet_numba(self.a, self.system.x, self.system.v, self.system.m, self.system.G, self.system.num_particles, self.dt)
+        self.current_time += self.dt
+
+        # Update trails
+        for i in range(self.system.num_particles):
+            self.trails[i].append(self.system.x[i].copy())
+            if len(self.trails[i]) > self.trail_length:
+                self.trails[i].pop(0)
+
+    def animate(self, frame):
+        """Animation callback"""
+        try:
+            for _ in range(self.steps_per_frame):
+                self.update_physics()
+
+            for i in range(self.system.num_particles):
+                self.body_plots[i]._offsets3d = ([self.system.x[i, 0]], [self.system.x[i, 1]], [self.system.x[i, 2]])
+                if len(self.trails[i]) > 1:
+                    trail = np.array(self.trails[i])
+                    self.trail_plots[i].set_data(trail[:, 0], trail[:, 1])
+                    self.trail_plots[i].set_3d_properties(trail[:, 2])
+                    self.trail_plots[i].set_alpha(0.6)
+                    self.trail_plots[i].set_linewidth(1.5)
+
+            self.ax.set_xlim(-self.view_limit, self.view_limit)
+            self.ax.set_ylim(-self.view_limit, self.view_limit)
+            self.ax.set_zlim(-self.view_limit, self.view_limit)
+
+            years = self.current_time / 365.25
+            self.ax.set_title(f'Solar System - {years:.1f} years ({self.current_time:.0f} days)')
+        except Exception as e:
+            print(f"Animation error: {e}")
+
+        return self.body_plots + self.trail_plots
+
+    def set_pluto_inclination(self, inclination_deg):
+        """Rotate Pluto around x-axis by inclination, from original vectors"""
+        if self.pluto_index is None:
+            return
+        angle = np.radians(inclination_deg)
+        rot = np.array([[1, 0, 0],
+                        [0, np.cos(angle), -np.sin(angle)],
+                        [0, np.sin(angle),  np.cos(angle)]])
+        self.system.x[self.pluto_index] = rot @ self.orig_pluto_pos
+        self.system.v[self.pluto_index] = rot @ self.orig_pluto_vel
+
+    def set_speed(self, val):
+        """
+        Change simulation speed with a conservative cap for stability.
+        """
+        max_days_per_step = 10.0  # >2 days/step tends to destabilize Mercury
+        if val > max_days_per_step:
+            print(f"Speed capped at {max_days_per_step} days/step to keep orbits stable.")
+            val = max_days_per_step
+            # Reflect cap on the slider
+            if hasattr(self, "slider_speed"):
+                self.slider_speed.set_val(val)
+        self.dt = val
+        print(f"Speed set to {self.dt} days per step")
+
+    def run(self):
+        """Start the interactive animation with sliders"""
+        self.ani = FuncAnimation(self.fig, self.animate, interval=50, blit=False, cache_frame_data=False)
+
+        plt.subplots_adjust(bottom=0.25)
+
+        ax_incl = plt.axes([0.15, 0.1, 0.65, 0.03], facecolor='lightgoldenrodyellow')
+        self.slider_incl = Slider(ax_incl, 'Pluto Incl. (°)', 0, 90, valinit=17, valstep=1)
+
+        ax_speed = plt.axes([0.15, 0.05, 0.65, 0.03], facecolor='lightblue')
+        self.slider_speed = Slider(ax_speed, 'Speed (days/step)', 0.1, 2.0, valinit=self.dt, valstep=0.1)
+
+        self.slider_incl.on_changed(self.set_pluto_inclination)
+        self.slider_speed.on_changed(self.set_speed)
+
+        print("Interactive Solar System Started!")
+        print("- Use sliders to control Pluto's inclination and simulation speed")
+        print("- Click and drag to rotate the view")
+
+        plt.show()
+
+# Usage
+if __name__ == "__main__":
+    sim = InteractiveSolarSystem("solar_system_plus")
+    sim.run()
