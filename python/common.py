@@ -24,6 +24,14 @@ class System:
         self.v -= v_cm
 
 
+RECOMMENDED_DT = {
+    "solar_system": 5.0,
+    "solar_system_plus": 5.0,
+    "solar_system_moons": 0.1,
+    "pyth-3-body": 0.01,
+}
+
+
 def get_initial_conditions(
     initial_condition: str,
 ) -> Tuple[System, List[Optional[str]], List[Optional[str]], bool]:
@@ -50,6 +58,14 @@ def get_initial_conditions(
         "Pluto": 975.500000,
         "Ceres": 62.62890,
         "Vesta": 17.288245,
+        # Major moons
+        "Io": 5959.916,
+        "Europa": 3202.739,
+        "Ganymede": 9887.834,
+        "Callisto": 7179.289,
+        "Titan": 8978.137,
+        "Triton": 1427.598,
+        "Charon": 102.271,
     }
 
     # GM values (AU^3 d^-2)
@@ -93,6 +109,27 @@ def get_initial_conditions(
         "Vesta": [-1.017876585480054e-02, -5.452367109338154e-04, 1.255870551153315e-03],
     }
 
+    # Barycentric ICRF positions and velocities for moons, 2024-Jan-01 TDB
+    # Source: NASA JPL Horizons (AU, AU/day)
+    SOLAR_SYSTEM_POS.update({
+        "Io":       [-1.724522741438490e-01,  9.668498086618660e-01,  1.650795862021568e-04],
+        "Europa":   [-1.745785098571780e-01,  9.671303667029830e-01,  6.831340058359380e-05],
+        "Ganymede": [-1.750791193000750e-01,  9.674527498900250e-01, -2.154760302069210e-04],
+        "Callisto": [-1.711956677430700e-01,  9.643774044960820e-01, -1.290753714578770e-04],
+        "Titan":    [ 8.967025703553760e00, -3.716783960302090e00, -2.935428478015480e-01],
+        "Triton":   [ 2.983419878978100e01, -1.797267195218900e00, -6.507851303985160e-01],
+        "Charon":   [ 1.720203476697500e01, -3.034152978258280e01, -1.729133528455140e00],
+    })
+    SOLAR_SYSTEM_VEL.update({
+        "Io":       [-1.771011640498150e-02, -2.924774559185490e-03, -1.834718375093810e-05],
+        "Europa":   [-1.693671720285490e-02, -3.533618780072620e-03,  2.037063671680660e-05],
+        "Ganymede": [-1.641244918609050e-02, -3.208310050527570e-03,  8.449777989987570e-05],
+        "Callisto": [-1.524701777039010e-02, -2.380424571905720e-03,  1.284979573671200e-05],
+        "Titan":    [ 1.645916867278360e-03,  5.185540645697290e-03, -1.580268628283850e-04],
+        "Triton":   [ 2.183400296659120e-04,  3.135817255898950e-03, -6.881820099540450e-05],
+        "Charon":   [ 2.823416278266780e-03,  8.383578706697400e-04, -9.047649499895600e-04],
+    })
+
     SOLAR_SYSTEM_COLORS = {
         "Sun": "orange",
         "Mercury": "slategrey",
@@ -103,6 +140,33 @@ def get_initial_conditions(
         "Saturn": "gold",
         "Uranus": "paleturquoise",
         "Neptune": "blue",
+    }
+
+    SOLAR_SYSTEM_MOONS_COLORS = {
+        "Sun": "orange",
+        "Mercury": "slategrey",
+        "Venus": "wheat",
+        "Earth": "skyblue",
+        "Mars": "red",
+        "Jupiter": "darkgoldenrod",
+        "Saturn": "gold",
+        "Uranus": "paleturquoise",
+        "Neptune": "blue",
+        "Moon": "lightgray",
+        "Io": "khaki",
+        "Europa": "lightcyan",
+        "Ganymede": "darkgray",
+        "Callisto": "dimgray",
+        "Titan": "burlywood",
+        "Triton": "lightsteelblue",
+        "Charon": "gainsboro",
+    }
+
+    # Recommended timestep per initial condition (days)
+    RECOMMENDED_DT = {
+        "solar_system": 5.0,
+        "solar_system_plus": 5.0,
+        "solar_system_moons": 0.1,
     }
 
     SOLAR_SYSTEM_PLUS_COLORS = {
@@ -201,6 +265,26 @@ def get_initial_conditions(
 
         return system, labels, colors, legend
 
+    elif initial_condition == "solar_system_moons":
+        moon_names = [
+            "Sun", "Mercury", "Venus", "Earth", "Mars",
+            "Jupiter", "Saturn", "Uranus", "Neptune",
+            "Moon", "Io", "Europa", "Ganymede", "Callisto",
+            "Titan", "Triton", "Charon",
+        ]
+        m = np.array([SOLAR_SYSTEM_MASSES[n] for n in moon_names])
+        x = np.array([np.array(SOLAR_SYSTEM_POS[n]) for n in moon_names])
+        v = np.array([np.array(SOLAR_SYSTEM_VEL[n]) for n in moon_names])
+
+        system = System(num_particles=len(m), x=x, v=v, m=m, G=G)
+        system.center_of_mass_correction()
+
+        labels = moon_names
+        colors = [SOLAR_SYSTEM_MOONS_COLORS[n] for n in moon_names]
+        legend = True
+
+        return system, labels, colors, legend
+
     else:
         raise ValueError(f"Initial condition not recognized: {initial_condition}.")
 
@@ -237,7 +321,7 @@ def acceleration(a: np.ndarray, system: System) -> None:
     eps2 = 1e-12  # (1e-6 AU)^2 softening
     r2 += np.eye(len(m)) * 0.0  # keep shape
     inv_r = 1.0 / np.sqrt(r2 + eps2)
-    inv_r3 = inv_r / (r2 + eps2)
+    inv_r3 = inv_r / r2
     np.fill_diagonal(inv_r3, 0.0)
 
     a[:] = G * np.einsum("ijk,ij,i->jk", r_ij, inv_r3, m)
@@ -249,17 +333,20 @@ def acceleration_numba(a, x, m, G, num_particles):
     a.fill(0.0)
     eps2 = 1e-12  # (1e-6 AU)^2
     for i in range(num_particles):
-        for j in range(num_particles):
-            if i != j:
-                dx = x[j, 0] - x[i, 0]
-                dy = x[j, 1] - x[i, 1]
-                dz = x[j, 2] - x[i, 2]
-                r2 = dx*dx + dy*dy + dz*dz + eps2
-                inv_r = 1.0 / np.sqrt(r2)
-                inv_r3 = inv_r / r2
-                a[i, 0] += G * m[j] * dx * inv_r3
-                a[i, 1] += G * m[j] * dy * inv_r3
-                a[i, 2] += G * m[j] * dz * inv_r3
+        for j in range(i + 1, num_particles):
+            dx = x[j, 0] - x[i, 0]
+            dy = x[j, 1] - x[i, 1]
+            dz = x[j, 2] - x[i, 2]
+            r2 = dx*dx + dy*dy + dz*dz + eps2
+            inv_r = 1.0 / np.sqrt(r2)
+            inv_r3 = inv_r / r2
+            fac = G * inv_r3
+            a[i, 0] += fac * m[j] * dx
+            a[i, 1] += fac * m[j] * dy
+            a[i, 2] += fac * m[j] * dz
+            a[j, 0] -= fac * m[i] * dx
+            a[j, 1] -= fac * m[i] * dy
+            a[j, 2] -= fac * m[i] * dz
 
 
 ##### Step 3 #####
@@ -283,17 +370,108 @@ def velocity_verlet_numba(a, x, v, m, G, num_particles, dt):
     a.fill(0.0)
     eps2 = 1e-12  # (1e-6 AU)^2
     for i in range(num_particles):
-        for j in range(num_particles):
-            if i != j:
+        for j in range(i + 1, num_particles):
+            dx = x[j, 0] - x[i, 0]
+            dy = x[j, 1] - x[i, 1]
+            dz = x[j, 2] - x[i, 2]
+            r2 = dx*dx + dy*dy + dz*dz + eps2
+            inv_r = 1.0 / np.sqrt(r2)
+            inv_r3 = inv_r / r2
+            fac = G * inv_r3
+            a[i, 0] += fac * m[j] * dx
+            a[i, 1] += fac * m[j] * dy
+            a[i, 2] += fac * m[j] * dz
+            a[j, 0] -= fac * m[i] * dx
+            a[j, 1] -= fac * m[i] * dy
+            a[j, 2] -= fac * m[i] * dz
+
+    # Kick velocities
+    v[:] = v + 0.5 * (a_old + a) * dt
+
+
+@jit(nopython=True)
+def ruth_forest_numba(a, x, v, m, G, num_particles, dt):
+    """Ruth-Forest 4th-order symplectic integrator"""
+    # Coefficients
+    c = [7.0/24.0, 3.0/4.0, -1.0/24.0]
+    d = [2.0/3.0, -2.0/3.0, 1.0]
+    eps2 = 1e-12
+
+    for s in range(3):
+        # Drift
+        for i in range(num_particles):
+            x[i, 0] += c[s] * v[i, 0] * dt
+            x[i, 1] += c[s] * v[i, 1] * dt
+            x[i, 2] += c[s] * v[i, 2] * dt
+
+        # Recompute acceleration
+        a.fill(0.0)
+        for i in range(num_particles):
+            for j in range(i + 1, num_particles):
                 dx = x[j, 0] - x[i, 0]
                 dy = x[j, 1] - x[i, 1]
                 dz = x[j, 2] - x[i, 2]
                 r2 = dx*dx + dy*dy + dz*dz + eps2
                 inv_r = 1.0 / np.sqrt(r2)
                 inv_r3 = inv_r / r2
-                a[i, 0] += G * m[j] * dx * inv_r3
-                a[i, 1] += G * m[j] * dy * inv_r3
-                a[i, 2] += G * m[j] * dz * inv_r3
+                fac = G * inv_r3
+                a[i, 0] += fac * m[j] * dx
+                a[i, 1] += fac * m[j] * dy
+                a[i, 2] += fac * m[j] * dz
+                a[j, 0] -= fac * m[i] * dx
+                a[j, 1] -= fac * m[i] * dy
+                a[j, 2] -= fac * m[i] * dz
 
-    # Kick velocities
-    v[:] = v + 0.5 * (a_old + a) * dt
+        # Kick
+        for i in range(num_particles):
+            v[i, 0] += d[s] * a[i, 0] * dt
+            v[i, 1] += d[s] * a[i, 1] * dt
+            v[i, 2] += d[s] * a[i, 2] * dt
+
+
+@jit(nopython=True)
+def yoshida4_numba(a, x, v, m, G, num_particles, dt):
+    """Yoshida 4th-order symplectic integrator"""
+    cr = 2.0 ** (1.0/3.0)
+    w0 = -cr / (2.0 - cr)
+    w1 = 1.0 / (2.0 - cr)
+    c = [w1, w0, w1]
+    d = [w1/2.0, (w0 + w1)/2.0, (w0 + w1)/2.0, w1/2.0]
+    eps2 = 1e-12
+
+    for s in range(3):
+        # Drift
+        for i in range(num_particles):
+            x[i, 0] += d[s] * v[i, 0] * dt
+            x[i, 1] += d[s] * v[i, 1] * dt
+            x[i, 2] += d[s] * v[i, 2] * dt
+
+        # Recompute acceleration
+        a.fill(0.0)
+        for i in range(num_particles):
+            for j in range(i + 1, num_particles):
+                dx = x[j, 0] - x[i, 0]
+                dy = x[j, 1] - x[i, 1]
+                dz = x[j, 2] - x[i, 2]
+                r2 = dx*dx + dy*dy + dz*dz + eps2
+                inv_r = 1.0 / np.sqrt(r2)
+                inv_r3 = inv_r / r2
+                fac = G * inv_r3
+                a[i, 0] += fac * m[j] * dx
+                a[i, 1] += fac * m[j] * dy
+                a[i, 2] += fac * m[j] * dz
+                a[j, 0] -= fac * m[i] * dx
+                a[j, 1] -= fac * m[i] * dy
+                a[j, 2] -= fac * m[i] * dz
+
+        # Kick
+        for i in range(num_particles):
+            v[i, 0] += c[s] * a[i, 0] * dt
+            v[i, 1] += c[s] * a[i, 1] * dt
+            v[i, 2] += c[s] * a[i, 2] * dt
+
+    # Final drift
+    for i in range(num_particles):
+        x[i, 0] += d[3] * v[i, 0] * dt
+        x[i, 1] += d[3] * v[i, 1] * dt
+        x[i, 2] += d[3] * v[i, 2] * dt

@@ -1,0 +1,53 @@
+{
+  "Python": {
+    "Velocity-Verlet": {
+      "wall_s": 0.0019415999995544553,
+      "steps_per_sec": 515039.14309305366,
+      "energy_error": 3.6024531081818326e-05
+    },
+    "Ruth-Forest": {
+      "wall_s": 0.0024662000068929046,
+      "steps_per_sec": 405482.1171052836,
+      "energy_error": 4.1985699362149364e-06
+    },
+    "Yoshida-4": {
+      "wall_s": 0.0024833000206854194,
+      "steps_per_sec": 402689.9656385411,
+      "energy_error": 1.757540561819325e-06
+    }
+  },
+  "Julia": {
+    "Velocity-Verlet": {
+      "steps_per_sec": 1000072.4845016691,
+      "energy_error": 3.602453106229428e-05,
+      "wall_s": 0.0
+    },
+    "Ruth-Forest": {
+      "steps_per_sec": 499976.6360710454,
+      "energy_error": 4.19856992107384e-06,
+      "wall_s": 0.0
+    },
+    "Yoshida-4": {
+      "steps_per_sec": 499976.6360710454,
+      "energy_error": 1.757540529943331e-06,
+      "wall_s": 0.0
+    }
+  },
+  "C++": {
+    "Velocity-Verlet": {
+      "steps_per_sec": 1666944.5,
+      "energy_error": 3.602e-05,
+      "wall_s": 0.0
+    },
+    "Ruth-Forest": {
+      "steps_per_sec": 891901.5,
+      "energy_error": 4.199e-06,
+      "wall_s": 0.0
+    },
+    "Yoshida-4": {
+      "steps_per_sec": 855212.5,
+      "energy_error": 1.758e-06,
+      "wall_s": 0.0
+    }
+  }
+}

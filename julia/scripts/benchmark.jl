@@ -1,121 +1,130 @@
 using Printf
-using Statistics
 include("../src/PlutoSim.jl")
 using .PlutoSim
 
-function benchmark_julia_physics(num_steps::Int, dt::Float64)
-    println("="^60)
-    println("JULIA BENCHMARK")
-    println("="^60)
-    
-    # Setup
-    system, _, _ = PlutoSim.get_initial_conditions()
-    a = zeros(system.num_particles, 3)
-    PlutoSim.acceleration!(a, system)
-    
-    # Initial energy
-    E0 = compute_total_energy(system)
-    
-    # Warmup (JIT compilation)
-    println("Warming up Julia JIT compiler...")
-    for _ in 1:100
-        PlutoSim.velocity_verlet!(system, a, dt)
-    end
-    
-    # Reset
-    system, _, _ = PlutoSim.get_initial_conditions()
-    PlutoSim.acceleration!(a, system)
-    
-    # Benchmark
-    println("Running $(num_steps) integration steps...")
-    times = Float64[]
-    
-    for i in 1:num_steps
-        t_start = time()
-        PlutoSim.velocity_verlet!(system, a, dt)
-        t_end = time()
-        push!(times, (t_end - t_start) * 1000)  # Convert to ms
-    end
-    
-    # Final energy
-    E_final = compute_total_energy(system)
-    energy_error = abs((E_final - E0) / E0) * 100
-    
-    # Statistics
-    mean_time = mean(times)
-    std_time = std(times)
-    min_time = minimum(times)
-    max_time = maximum(times)
-    total_time = sum(times) / 1000  # Convert to seconds
-    
-    println("\nResults:")
-    println("  Total time:          $(Printf.@sprintf("%.3f", total_time)) seconds")
-    println("  Mean time per step:  $(Printf.@sprintf("%.4f", mean_time)) ms")
-    println("  Std deviation:       $(Printf.@sprintf("%.4f", std_time)) ms")
-    println("  Min time:            $(Printf.@sprintf("%.4f", min_time)) ms")
-    println("  Max time:            $(Printf.@sprintf("%.4f", max_time)) ms")
-    println("  Steps per second:    $(Printf.@sprintf("%.1f", 1000/mean_time))")
-    println("\nEnergy Conservation:")
-    println("  Initial energy:      $(Printf.@sprintf("%.6e", E0))")
-    println("  Final energy:        $(Printf.@sprintf("%.6e", E_final))")
-    println("  Relative error:      $(Printf.@sprintf("%.6f", energy_error))%")
-    
-    return Dict(
-        "mean_time_ms" => mean_time,
-        "total_time_s" => total_time,
-        "energy_error_percent" => energy_error,
-        "steps_per_second" => 1000/mean_time
-    )
-end
-
 function compute_total_energy(system::System)
-    # Kinetic energy
     KE = 0.5 * sum(system.m[i] * sum(system.v[i, :].^2) for i in 1:system.num_particles)
-    
-    # Potential energy
     PE = 0.0
     for i in 1:system.num_particles
         for j in (i+1):system.num_particles
-            r_ij = system.x[j, :] - system.x[i, :]
-            r = sqrt(sum(r_ij.^2))
+            r = sqrt(sum((system.x[j, :] .- system.x[i, :]).^2))
             PE -= system.G * system.m[i] * system.m[j] / r
         end
     end
-    
     return KE + PE
 end
 
-function memory_benchmark()
-    println("\n" * "="^60)
-    println("MEMORY USAGE")
-    println("="^60)
-    
-    system, _, _ = PlutoSim.get_initial_conditions()
+function bench_integrator(name::String, integrator_fn!, force_evals::Int,
+                           ic::String, num_steps::Int, dt::Float64,
+                           warmup_steps::Int=10; quiet::Bool=false)
+    # Warmup: fresh system, run warmup_steps to trigger JIT
+    system, _, _ = PlutoSim.get_initial_conditions(ic)
     a = zeros(system.num_particles, 3)
-    
-    # Estimate memory usage
-    system_size = sizeof(system.x) + sizeof(system.v) + sizeof(system.m) + sizeof(a)
-    println("  System state:        $(system_size) bytes ($(system_size/1024) KB)")
-    println("  Per particle:        $(system_size/system.num_particles) bytes")
-    
-    return system_size
+    PlutoSim.acceleration!(a, system)
+    if !quiet
+        print("  [$name] warming up ($warmup_steps steps)... ")
+        flush(stdout)
+    end
+    for _ in 1:warmup_steps
+        integrator_fn!(system, a, dt)
+    end
+    if !quiet
+        println("done")
+    end
+
+    # Fresh system for timed run
+    system, _, _ = PlutoSim.get_initial_conditions(ic)
+    a = zeros(system.num_particles, 3)
+    PlutoSim.acceleration!(a, system)
+    E0 = compute_total_energy(system)
+
+    t0 = time()
+    for _ in 1:num_steps
+        integrator_fn!(system, a, dt)
+    end
+    wall = time() - t0
+
+    Ef = compute_total_energy(system)
+    energy_error = abs((Ef - E0) / E0)
+    sps = num_steps / wall
+    mean_ms = wall / num_steps * 1000
+
+    if !quiet
+        @printf("  [%s] done: %.1f steps/s, |dE/E0|=%.3e, mean=%.4f ms/step\n",
+                name, sps, energy_error, mean_ms)
+    end
+
+    return Dict(
+        "name"                 => name,
+        "steps_per_sec"        => sps,
+        "mean_ms_per_step"     => mean_ms,
+        "energy_error"         => energy_error,
+        "force_evals_per_step" => force_evals,
+        "wall_s"               => wall,
+        "E0"                   => E0,
+        "Ef"                   => Ef,
+    )
 end
 
-# Main benchmark
-println("\nStarting Julia benchmarks...")
-println("Configuration: 12 bodies, dt=5.0 days")
+function run_benchmarks(; json_mode::Bool=false)
+    IC        = "solar_system_plus"
+    NUM_STEPS = 1000
+    DT        = 5.0
 
-# Run benchmarks
-results = benchmark_julia_physics(1000, 5.0)
-mem_usage = memory_benchmark()
+    if !json_mode
+        println()
+        println("=" ^ 60)
+        println("JULIA N-BODY BENCHMARK")
+        @printf("Initial condition : %s  (%d steps, dt=%.1f days)\n", IC, NUM_STEPS, DT)
+        println("=" ^ 60)
+    end
 
-println("\n" * "="^60)
-println("BENCHMARK COMPLETE")
-println("="^60)
-println("\nTo compare with Python:")
-println("  1. Run: python benchmark_python.py")
-println("  2. Compare the results")
-println("\nJulia Results Summary:")
-println("  - $(Printf.@sprintf("%.1f", results["steps_per_second"])) steps/second")
-println("  - $(Printf.@sprintf("%.6f", results["energy_error_percent"]))% energy error")
-println("  - $(Printf.@sprintf("%.3f", results["total_time_s"])) seconds total")
+    integrators = [
+        ("Velocity-Verlet", PlutoSim.velocity_verlet!, 2),
+        ("Ruth-Forest",     PlutoSim.ruth_forest!,     3),
+        ("Yoshida-4",       PlutoSim.yoshida4!,        4),
+    ]
+
+    results = []
+    for (name, fn!, fevals) in integrators
+        r = bench_integrator(name, fn!, fevals, IC, NUM_STEPS, DT; quiet=json_mode)
+        push!(results, r)
+    end
+
+    if json_mode
+        # Emit compact JSON to stdout for benchmark_all.py to parse
+        entries = join([
+            string("{\"integrator\":\"", r["name"],
+                   "\",\"steps_per_sec\":", r["steps_per_sec"],
+                   ",\"energy_error\":", r["energy_error"], "}")
+            for r in results
+        ], ",")
+        println("{\"results\":[", entries, "]}")
+    else
+        # Human-readable table
+        println()
+        println("=" ^ 70)
+        @printf("%-20s  %12s  %14s  %18s\n",
+                "Integrator", "Steps/sec", "|dE/E0|", "Force evals/step")
+        println("-" ^ 70)
+        for r in results
+            @printf("%-20s  %12.1f  %14.3e  %18d\n",
+                    r["name"], r["steps_per_sec"], r["energy_error"],
+                    r["force_evals_per_step"])
+        end
+        println("=" ^ 70)
+
+        # Memory estimate
+        system, _, _ = PlutoSim.get_initial_conditions(IC)
+        a = zeros(system.num_particles, 3)
+        mem_bytes = sizeof(system.x) + sizeof(system.v) + sizeof(system.m) + sizeof(a)
+        @printf("\nMemory (state arrays): %d bytes (%.1f KB), %.0f bytes/particle\n\n",
+                mem_bytes, mem_bytes/1024, mem_bytes/system.num_particles)
+    end
+
+    return results
+end
+
+# Detect --json flag
+json_mode = "--json" in ARGS
+run_benchmarks(; json_mode=json_mode)

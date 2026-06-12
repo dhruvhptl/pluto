@@ -1,113 +1,122 @@
-import numpy as np
+import os
+import sys
+import pathlib
+import shutil
 import time
+
+import numpy as np
+
+# ── Clear Numba cache so any common.py changes take effect ───────────────────
+_here = pathlib.Path(__file__).parent
+for _p in list(_here.rglob("__pycache__")) + list(pathlib.Path(".").rglob("__pycache__")):
+    shutil.rmtree(_p, ignore_errors=True)
+for _ext in ["*.nbi", "*.nbc"]:
+    for _p in list(_here.rglob(_ext)) + list(pathlib.Path(".").rglob(_ext)):
+        _p.unlink(missing_ok=True)
+
+# Must import after cache wipe so Numba recompiles from source
+sys.path.insert(0, str(_here))
 import common
-from statistics import mean, stdev
 
-def benchmark_python_physics(num_steps, dt):
-    print("="*60)
-    print("PYTHON BENCHMARK")
-    print("="*60)
-    
-    # Setup
-    system, _, _, _ = common.get_initial_conditions("solar_system_plus")
-    a = np.zeros((system.num_particles, 3))
-    
-    # Initial energy
-    E0 = compute_total_energy(system)
-    
-    # Warmup
-    print("Warming up Numba JIT compiler...")
-    for _ in range(100):
-        common.velocity_verlet_numba(a, system.x, system.v, system.m, 
-                                     system.G, system.num_particles, dt)
-    
-    # Reset
-    system, _, _, _ = common.get_initial_conditions("solar_system_plus")
-    common.acceleration_numba(a, system.x, system.m, system.G, system.num_particles)
-    
-    # Benchmark
-    print(f"Running {num_steps} integration steps...")
-    times = []
-    
-    for i in range(num_steps):
-        t_start = time.time()
-        common.velocity_verlet_numba(a, system.x, system.v, system.m,
-                                     system.G, system.num_particles, dt)
-        t_end = time.time()
-        times.append((t_end - t_start) * 1000)  # Convert to ms
-    
-    # Final energy
-    E_final = compute_total_energy(system)
-    energy_error = abs((E_final - E0) / E0) * 100
-    
-    # Statistics
-    mean_time = mean(times)
-    std_time = stdev(times)
-    min_time = min(times)
-    max_time = max(times)
-    total_time = sum(times) / 1000  # Convert to seconds
-    
-    print("\nResults:")
-    print(f"  Total time:          {total_time:.3f} seconds")
-    print(f"  Mean time per step:  {mean_time:.4f} ms")
-    print(f"  Std deviation:       {std_time:.4f} ms")
-    print(f"  Min time:            {min_time:.4f} ms")
-    print(f"  Max time:            {max_time:.4f} ms")
-    print(f"  Steps per second:    {1000/mean_time:.1f}")
-    print("\nEnergy Conservation:")
-    print(f"  Initial energy:      {E0:.6e}")
-    print(f"  Final energy:        {E_final:.6e}")
-    print(f"  Relative error:      {energy_error:.6f}%")
-    
-    return {
-        "mean_time_ms": mean_time,
-        "total_time_s": total_time,
-        "energy_error_percent": energy_error,
-        "steps_per_second": 1000/mean_time
-    }
 
-def compute_total_energy(system):
-    # Kinetic energy
-    KE = 0.5 * np.sum(system.m[:, np.newaxis] * np.sum(system.v**2, axis=1))
-    
-    # Potential energy
+# ── Energy helper ─────────────────────────────────────────────────────────────
+
+def total_energy(system):
+    KE = 0.5 * np.sum(system.m[:, np.newaxis] * system.v**2)
     PE = 0.0
-    for i in range(system.num_particles):
-        for j in range(i+1, system.num_particles):
-            r_ij = system.x[j] - system.x[i]
-            r = np.linalg.norm(r_ij)
+    N = system.num_particles
+    for i in range(N):
+        for j in range(i + 1, N):
+            r = np.linalg.norm(system.x[j] - system.x[i])
             PE -= system.G * system.m[i] * system.m[j] / r
-    
     return KE + PE
 
-def memory_benchmark():
-    print("\n" + "="*60)
-    print("MEMORY USAGE")
-    print("="*60)
-    
-    system, _, _, _ = common.get_initial_conditions("solar_system_plus")
-    a = np.zeros((system.num_particles, 3))
-    
-    # Estimate memory usage
-    system_size = system.x.nbytes + system.v.nbytes + system.m.nbytes + a.nbytes
-    print(f"  System state:        {system_size} bytes ({system_size/1024:.1f} KB)")
-    print(f"  Per particle:        {system_size/system.num_particles:.1f} bytes")
-    
-    return system_size
 
-# Main benchmark
+# ── Per-integrator benchmark ──────────────────────────────────────────────────
+
+def bench_integrator(name, step_fn, force_evals_per_step, ic, num_steps, dt,
+                     warmup_steps=10):
+    # Fresh initial conditions
+    system, _, _, _ = common.get_initial_conditions(ic)
+    a = np.zeros((system.num_particles, 3))
+    common.acceleration_numba(a, system.x, system.m, system.G, system.num_particles)
+
+    # Numba JIT warmup (compiles on first call)
+    print(f"  [{name}] warming up ({warmup_steps} steps)...", flush=True)
+    for _ in range(warmup_steps):
+        step_fn(a, system.x, system.v, system.m, system.G, system.num_particles, dt)
+
+    # Fresh reset after warmup
+    system, _, _, _ = common.get_initial_conditions(ic)
+    a = np.zeros((system.num_particles, 3))
+    common.acceleration_numba(a, system.x, system.m, system.G, system.num_particles)
+    E0 = total_energy(system)
+
+    # Timed run
+    t0 = time.perf_counter()
+    for _ in range(num_steps):
+        step_fn(a, system.x, system.v, system.m, system.G, system.num_particles, dt)
+    wall = time.perf_counter() - t0
+
+    Ef = total_energy(system)
+    energy_error = abs((Ef - E0) / E0)
+    sps = num_steps / wall
+    mean_ms = wall / num_steps * 1000
+
+    print(f"  [{name}] done: {sps:.1f} steps/s, |dE/E0|={energy_error:.3e}, "
+          f"mean={mean_ms:.4f} ms/step")
+
+    return {
+        "name": name,
+        "steps_per_sec": sps,
+        "mean_ms_per_step": mean_ms,
+        "energy_error": energy_error,
+        "force_evals_per_step": force_evals_per_step,
+        "wall_s": wall,
+        "E0": E0,
+        "Ef": Ef,
+    }
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    print("\nStarting Python benchmarks...")
-    print("Configuration: 12 bodies, dt=5.0 days")
-    
-    # Run benchmarks
-    results = benchmark_python_physics(1000, 5.0)
-    mem_usage = memory_benchmark()
-    
-    print("\n" + "="*60)
-    print("BENCHMARK COMPLETE")
-    print("="*60)
-    print("\nPython Results Summary:")
-    print(f"  - {results['steps_per_second']:.1f} steps/second")
-    print(f"  - {results['energy_error_percent']:.6f}% energy error")
-    print(f"  - {results['total_time_s']:.3f} seconds total")
+    IC = "solar_system_plus"
+    NUM_STEPS = 1000
+    DT = 5.0
+
+    print()
+    print("=" * 60)
+    print("PYTHON N-BODY BENCHMARK")
+    print(f"Initial condition : {IC}  ({NUM_STEPS} steps, dt={DT} days)")
+    print("=" * 60)
+
+    integrators = [
+        ("Velocity-Verlet", common.velocity_verlet_numba, 2),
+        ("Ruth-Forest",     common.ruth_forest_numba,     3),
+        ("Yoshida-4",       common.yoshida4_numba,        4),
+    ]
+
+    results = []
+    for name, fn, feval in integrators:
+        r = bench_integrator(name, fn, feval, IC, NUM_STEPS, DT)
+        results.append(r)
+
+    # ── Summary table ──────────────────────────────────────────────────────────
+    print()
+    print("=" * 70)
+    print(f"{'Integrator':<20} {'Steps/sec':>12} {'|dE/E0|':>14} {'Force evals/step':>18}")
+    print("-" * 70)
+    for r in results:
+        print(f"{r['name']:<20} {r['steps_per_sec']:>12.1f} "
+              f"{r['energy_error']:>14.3e} {r['force_evals_per_step']:>18d}")
+    print("=" * 70)
+    print()
+
+    # ── Memory estimate ────────────────────────────────────────────────────────
+    system, _, _, _ = common.get_initial_conditions(IC)
+    a = np.zeros((system.num_particles, 3))
+    mem = system.x.nbytes + system.v.nbytes + system.m.nbytes + a.nbytes
+    print(f"Memory (state arrays): {mem} bytes ({mem/1024:.1f} KB), "
+          f"{mem/system.num_particles:.0f} bytes/particle")
+    print()
